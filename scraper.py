@@ -51,7 +51,31 @@ def _fetch(url: str, timeout: int = 20, premium: bool = False) -> Optional[reque
 
 def test_connection(url: str = "https://www.propertyfinder.ae/en/search?c=1&fu=0&rp=y&ob=mr&pe=3000000&pb=2500000&l=dubai-hills-estate") -> dict:
     """Test ScraperAPI connection and return diagnostic info."""
-    resp = _fetch(url, premium=True)
+    # Step 1: verify API key works at all with a cheap request
+    error_detail = ""
+    try:
+        ping_url = (
+            f"https://api.scraperapi.com"
+            f"?api_key={_SCRAPER_API_KEY}"
+            f"&url={requests.utils.quote('http://httpbin.org/ip', safe='')}"
+        )
+        ping = requests.get(ping_url, timeout=30)
+        if ping.status_code != 200:
+            return {
+                "ok": False, "status": ping.status_code,
+                "has_next_data": False,
+                "preview": ping.text[:300],
+                "diagnostics": f"ScraperAPI key check failed — HTTP {ping.status_code}. Check your key and credit balance at app.scraperapi.com.",
+            }
+    except Exception as e:
+        return {
+            "ok": False, "status": None, "has_next_data": False,
+            "preview": "",
+            "diagnostics": f"Cannot reach ScraperAPI: {e}\n\nCheck that your API key is correct and you have credits remaining at app.scraperapi.com",
+        }
+
+    # Step 2: try PropertyFinder without premium (1 credit instead of 25)
+    resp = _fetch(url, premium=False)
     if not resp:
         return {"ok": False, "status": None, "has_next_data": False, "preview": "Request failed", "diagnostics": ""}
 
@@ -382,7 +406,7 @@ def scrape_bayut(location_name: str) -> List[dict]:
 
     for page in range(1, 6):
         url = _bayut_search_url(slug, page)
-        resp = _fetch(url, premium=bool(_SCRAPER_API_KEY))
+        resp = _fetch(url, premium=False)
         if not resp:
             break
         results = _parse_bayut_page(resp.text, location_name)
