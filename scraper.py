@@ -53,16 +53,53 @@ def test_connection(url: str = "https://www.bayut.com/for-sale/property/dubai/du
     """Test ScraperAPI connection and return diagnostic info."""
     resp = _fetch(url, premium=True)
     if not resp:
-        return {"ok": False, "status": None, "has_next_data": False, "preview": "Request failed"}
+        return {"ok": False, "status": None, "has_next_data": False, "preview": "Request failed", "diagnostics": ""}
 
-    from bs4 import BeautifulSoup
     soup = BeautifulSoup(resp.text, "html.parser")
     has_next = soup.find("script", {"id": "__NEXT_DATA__"}) is not None
+
+    # Collect diagnostic info about what data is available in the page
+    diag_lines = []
+
+    # All script tag types and ids
+    for s in soup.find_all("script"):
+        sid = s.get("id", "")
+        stype = s.get("type", "")
+        content_len = len(s.string or "")
+        if sid or stype == "application/ld+json" or content_len > 500:
+            diag_lines.append(f"<script id='{sid}' type='{stype}' len={content_len}>")
+
+    # JSON-LD blocks
+    json_ld = soup.find_all("script", {"type": "application/ld+json"})
+    diag_lines.append(f"JSON-LD blocks found: {len(json_ld)}")
+    for jld in json_ld[:2]:
+        diag_lines.append(f"  JSON-LD: {(jld.string or '')[:200]}")
+
+    # Look for price-like numbers in the page
+    import re
+    prices = re.findall(r'[\d,]{7,}', resp.text)
+    diag_lines.append(f"Price-like numbers found: {prices[:10]}")
+
+    # Page title
+    diag_lines.append(f"Title: {soup.title.string if soup.title else 'none'}")
+
+    # Any data attributes with 'price' or 'listing'
+    price_attrs = soup.find_all(attrs={"data-price": True})
+    diag_lines.append(f"data-price elements: {len(price_attrs)}")
+
+    # Check for window.__data__ or similar in inline scripts
+    for s in soup.find_all("script"):
+        text = s.string or ""
+        if any(kw in text for kw in ["listing", "property", "price", "__data__", "hits"]):
+            diag_lines.append(f"Keyword script found (len={len(text)}): {text[:300]}")
+            break
+
     return {
         "ok": resp.status_code == 200,
         "status": resp.status_code,
         "has_next_data": has_next,
-        "preview": resp.text[:300],
+        "preview": resp.text[:500],
+        "diagnostics": "\n".join(diag_lines),
     }
 
 
@@ -90,71 +127,241 @@ def _bayut_search_url(slug: str, page: int = 1) -> str:
 
 def _parse_bayut_page(html: str, location_name: str) -> List[dict]:
     soup = BeautifulSoup(html, "html.parser")
-    script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
-    if not script_tag:
-        return []
+    sc_psf = LOCATIONS.get(location_name, {}).get("service_charge_psf", 15)
 
+    # Strategy 1: __NEXT_DATA__ JSON (legacy, may still appear)
+    results = _bayut_from_next_data(soup, location_name, sc_psf)
+    if results:
+        return results
+
+    # Strategy 2: JSON-LD (Schema.org structured data)
+    results = _bayut_from_json_ld(soup, location_name, sc_psf)
+    if results:
+        return results
+
+    # Strategy 3: inline window.__data__ / __APOLLO_STATE__ / similar
+    results = _bayut_from_inline_json(soup, location_name, sc_psf)
+    if results:
+        return results
+
+    # Strategy 4: parse HTML DOM directly (article/li cards)
+    results = _bayut_from_html(soup, location_name, sc_psf)
+    return results
+
+
+def _bayut_from_next_data(soup, location_name, sc_psf) -> List[dict]:
+    tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if not tag:
+        return []
     try:
-        data = json.loads(script_tag.string)
-    except (json.JSONDecodeError, TypeError):
+        data = json.loads(tag.string)
+    except Exception:
         return []
 
     hits = []
-    try:
-        hits = data["props"]["pageProps"]["searchResult"]["hits"]
-    except (KeyError, TypeError):
-        pass
-
-    if not hits:
+    for path in [
+        ["props", "pageProps", "searchResult", "hits"],
+        ["props", "pageProps", "listingList", "listings"],
+    ]:
         try:
-            hits = data["props"]["pageProps"]["listingList"]["listings"]
+            node = data
+            for key in path:
+                node = node[key]
+            hits = node
+            break
         except (KeyError, TypeError):
-            pass
+            continue
 
     results = []
     for h in hits:
         try:
-            prop_id = _make_id("bayut", str(h.get("externalID", h.get("id", ""))))
             price = int(h.get("price", 0))
             area = float(h.get("area", 0))
-            price_psf = round(price / area, 2) if area > 0 else 0
-
-            loc_parts = h.get("location", [])
-            community = loc_parts[-1].get("name", "") if loc_parts else ""
-
-            cover = ""
-            if h.get("coverPhoto"):
-                cover = h["coverPhoto"].get("url", "")
-            elif h.get("mainPhoto"):
-                cover = h["mainPhoto"].get("url", "")
-
-            sc_psf = LOCATIONS.get(location_name, {}).get("service_charge_psf", 15)
-            service_charge = round(sc_psf * area / 12, 0)
-
+            if not price or price < PRICE_MIN or price > PRICE_MAX:
+                continue
+            cover = (h.get("coverPhoto") or h.get("mainPhoto") or {}).get("url", "")
+            service_charge = round(sc_psf * area / 12, 0) if area else 0
             results.append({
-                "id": prop_id,
+                "id": _make_id("bayut", str(h.get("externalID", h.get("id", "")))),
                 "title": h.get("title", ""),
                 "price": price,
                 "bedrooms": int(h.get("rooms", 0)),
                 "bathrooms": int(h.get("baths", 0)),
                 "area_sqft": area,
-                "price_per_sqft": price_psf,
+                "price_per_sqft": round(price / area, 2) if area else 0,
                 "location": location_name,
-                "community": community,
+                "community": (h.get("location") or [{}])[-1].get("name", ""),
                 "property_type": _get_property_type(h),
                 "url": BAYUT_BASE + h.get("slug", ""),
                 "source": "Bayut",
                 "cover_photo": cover,
                 "listed_date": h.get("createdAt", ""),
                 "service_charge_estimate": service_charge,
-                "latitude": h.get("geography", {}).get("lat"),
-                "longitude": h.get("geography", {}).get("lng"),
+                "latitude": (h.get("geography") or {}).get("lat"),
+                "longitude": (h.get("geography") or {}).get("lng"),
                 "agent_name": h.get("contactName", ""),
-                "agent_phone": (
-                    h.get("phoneNumber", {}).get("mobile", "")
-                    if isinstance(h.get("phoneNumber"), dict) else ""
-                ),
+                "agent_phone": (h.get("phoneNumber") or {}).get("mobile", ""),
                 "description": h.get("description", "")[:500],
+            })
+        except Exception:
+            continue
+    return results
+
+
+def _bayut_from_json_ld(soup, location_name, sc_psf) -> List[dict]:
+    results = []
+    for tag in soup.find_all("script", {"type": "application/ld+json"}):
+        try:
+            data = json.loads(tag.string or "")
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            try:
+                price = int(str(item.get("price", item.get("offers", {}).get("price", 0))).replace(",", "").replace("AED", "").strip() or 0)
+                if not price or price < PRICE_MIN or price > PRICE_MAX:
+                    continue
+                url = item.get("url", "")
+                name = item.get("name", item.get("headline", ""))
+                if not name:
+                    continue
+                results.append({
+                    "id": _make_id("bayut_ld", url or name),
+                    "title": name,
+                    "price": price,
+                    "bedrooms": int(item.get("numberOfRooms", item.get("numberOfBedrooms", 0)) or 0),
+                    "bathrooms": int(item.get("numberOfBathroomsTotal", 0) or 0),
+                    "area_sqft": float(item.get("floorSize", {}).get("value", 0) or 0),
+                    "price_per_sqft": 0,
+                    "location": location_name,
+                    "community": "",
+                    "property_type": item.get("@type", "Property"),
+                    "url": url,
+                    "source": "Bayut",
+                    "cover_photo": item.get("image", ""),
+                    "listed_date": "",
+                    "service_charge_estimate": 0,
+                    "latitude": None,
+                    "longitude": None,
+                    "agent_name": "",
+                    "agent_phone": "",
+                    "description": item.get("description", "")[:500],
+                })
+            except Exception:
+                continue
+    return results
+
+
+def _bayut_from_inline_json(soup, location_name, sc_psf) -> List[dict]:
+    """Look for property data in inline JS variables like window.__data__, __APOLLO_STATE__, etc."""
+    import re
+    keywords = ["hits", "listings", "properties", "__APOLLO_STATE__", "searchResult"]
+    for tag in soup.find_all("script"):
+        text = tag.string or ""
+        if not any(kw in text for kw in keywords):
+            continue
+        if len(text) < 200:
+            continue
+        # Try to find and parse any JSON object/array
+        for pattern in [
+            r'"hits"\s*:\s*(\[.*?\])\s*[,}]',
+            r'"listings"\s*:\s*(\[.*?\])\s*[,}]',
+            r'"properties"\s*:\s*(\[.*?\])\s*[,}]',
+        ]:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                try:
+                    hits = json.loads(match.group(1))
+                    if hits and isinstance(hits, list):
+                        return _bayut_from_next_data.__wrapped__ if hasattr(_bayut_from_next_data, '__wrapped__') else []
+                except Exception:
+                    continue
+    return []
+
+
+def _bayut_from_html(soup, location_name, sc_psf) -> List[dict]:
+    """Parse property cards directly from rendered HTML."""
+    import re
+    results = []
+
+    # Bayut renders <article> elements for each listing, or <li> items
+    cards = soup.find_all("article")
+    if not cards:
+        cards = soup.select("li[class*='property'], li[class*='listing'], div[class*='PropertyCard'], div[class*='listing-card']")
+
+    for card in cards:
+        try:
+            # Price — look for AED amounts
+            text = card.get_text(" ", strip=True)
+            price_match = re.search(r'AED\s*([\d,]+)', text)
+            if not price_match:
+                continue
+            price = int(price_match.group(1).replace(",", ""))
+            if price < PRICE_MIN or price > PRICE_MAX:
+                continue
+
+            # URL
+            link = card.find("a", href=True)
+            url = ""
+            if link:
+                href = link["href"]
+                url = href if href.startswith("http") else BAYUT_BASE + href
+
+            # Title
+            title = ""
+            for tag in ["h2", "h3", "h4"]:
+                el = card.find(tag)
+                if el:
+                    title = el.get_text(strip=True)
+                    break
+            if not title and link:
+                title = link.get_text(strip=True)[:100]
+
+            # Beds / baths / area — look for patterns like "3 Beds", "2 Baths", "1,500 sqft"
+            beds = 0
+            baths = 0
+            area = 0.0
+            bed_m = re.search(r'(\d+)\s*(?:Bed|BR|Bedroom)', text, re.IGNORECASE)
+            bath_m = re.search(r'(\d+)\s*(?:Bath|Bathroom)', text, re.IGNORECASE)
+            area_m = re.search(r'([\d,]+)\s*(?:sqft|sq\.?\s*ft)', text, re.IGNORECASE)
+            if bed_m:
+                beds = int(bed_m.group(1))
+            if bath_m:
+                baths = int(bath_m.group(1))
+            if area_m:
+                area = float(area_m.group(1).replace(",", ""))
+
+            # Cover photo
+            img = card.find("img")
+            cover = img.get("src", img.get("data-src", "")) if img else ""
+
+            service_charge = round(sc_psf * area / 12, 0) if area else 0
+            price_psf = round(price / area, 2) if area else 0
+
+            if not title or not url:
+                continue
+
+            results.append({
+                "id": _make_id("bayut_html", url),
+                "title": title,
+                "price": price,
+                "bedrooms": beds,
+                "bathrooms": baths,
+                "area_sqft": area,
+                "price_per_sqft": price_psf,
+                "location": location_name,
+                "community": "",
+                "property_type": "Property",
+                "url": url,
+                "source": "Bayut",
+                "cover_photo": cover,
+                "listed_date": "",
+                "service_charge_estimate": service_charge,
+                "latitude": None,
+                "longitude": None,
+                "agent_name": "",
+                "agent_phone": "",
+                "description": "",
             })
         except Exception:
             continue

@@ -115,15 +115,14 @@ with st.sidebar:
             with st.spinner("Testing ScraperAPI against Bayut..."):
                 result = test_connection()
             if result["ok"] and result["has_next_data"]:
-                st.success("Connection OK — listing data found!")
-            elif result["ok"] and not result["has_next_data"]:
-                st.warning("Connected but listing data not found in page. Site may have changed structure.")
-                with st.expander("Page preview"):
-                    st.code(result["preview"])
+                st.success("Connection OK — listing data found via __NEXT_DATA__!")
+            elif result["ok"]:
+                st.warning("Connected — page returned but parsing needs review.")
             else:
                 st.error(f"Connection failed (HTTP {result['status']})")
-                with st.expander("Page preview"):
-                    st.code(result["preview"])
+            with st.expander("Diagnostics (share with developer if issues persist)"):
+                st.code(result["diagnostics"])
+                st.code(result["preview"])
 
     st.subheader("Data Refresh")
     last = get_last_refresh()
