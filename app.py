@@ -230,24 +230,30 @@ with tab1:
                     continue
                 p = df.iloc[idx].to_dict()
                 with col_ui:
-                    badge = ""
-                    if p.get("is_distress"):
-                        badge = '<span class="distress-badge">DISTRESS</span>'
-                    elif p.get("value_assessment") in ("Excellent Value", "Good Value"):
-                        badge = f'<span class="good-value-badge">{p["value_assessment"]}</span>'
+                    with st.container(border=True):
+                        photo = p.get("cover_photo", "")
+                        if photo:
+                            try:
+                                st.image(photo, use_container_width=True)
+                            except Exception:
+                                pass
 
-                    st.markdown(f"""
-                    <div class="property-card">
+                        badge = ""
+                        if p.get("is_distress"):
+                            badge = '<span class="distress-badge">DISTRESS</span>'
+                        elif p.get("value_assessment") in ("Excellent Value", "Good Value"):
+                            badge = f'<span class="good-value-badge">{p["value_assessment"]}</span>'
+
+                        st.markdown(f"""
                         <strong>{p.get("title", "N/A")}</strong> {badge}<br>
                         <small>{p.get("location")} &bull; {p.get("source")}</small><br>
                         <h3 style="margin:0.3rem 0">AED {p.get("price",0):,.0f}</h3>
                         <span>{p.get("bedrooms","?")} Bed &bull; {p.get("bathrooms","?")} Bath &bull; {p.get("area_sqft",0):,.0f} sqft</span><br>
                         <small>AED {p.get("price_per_sqft",0):,.0f}/sqft &bull; {p.get("days_on_market",0)} days listed</small><br>
                         <small>Est. Service Charge: AED {p.get("service_charge_estimate",0):,.0f}/month</small>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    if p.get("url"):
-                        st.markdown(f"[View Listing]({p['url']})", unsafe_allow_html=False)
+                        """, unsafe_allow_html=True)
+                        if p.get("url"):
+                            st.link_button("View Listing", p["url"], use_container_width=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -269,6 +275,12 @@ with tab2:
             ):
                 col_a, col_b = st.columns([2, 1])
                 with col_a:
+                    photo = p.get("cover_photo", "")
+                    if photo:
+                        try:
+                            st.image(photo, use_container_width=True)
+                        except Exception:
+                            pass
                     st.markdown(f"**Location:** {p.get('location')} | **Source:** {p.get('source')}")
                     st.markdown(f"**Price:** AED {p.get('price', 0):,} | **{p.get('area_sqft', 0):,.0f} sqft** | AED {p.get('price_per_sqft', 0):,.0f}/sqft")
                     st.markdown(f"**Listed for:** {p.get('days_on_market', 0)} days")
