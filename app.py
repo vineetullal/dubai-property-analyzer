@@ -214,12 +214,12 @@ with tab1:
         st.stop()
 
     # Sort controls
-    sort_col, sort_dir_col, view_col = st.columns([2, 1, 1])
+    sort_col, view_col = st.columns([3, 1])
     sort_by = sort_col.selectbox(
         "Sort by",
-        ["Price (Low-High)", "Price (High-Low)", "Price/sqft", "Value Score", "Days on Market", "Distress Score"],
+        ["Price (Low-High)", "Price (High-Low)", "Price/sqft", "Days on Market", "Distress Score"],
     )
-    view_mode = view_col.radio("View", ["Table", "Cards"], horizontal=True)
+    view_mode = view_col.radio("View", ["Cards", "Table"], horizontal=True)
 
     df = pd.DataFrame(properties)
 
@@ -227,7 +227,6 @@ with tab1:
         "Price (Low-High)": ("price", True),
         "Price (High-Low)": ("price", False),
         "Price/sqft": ("price_per_sqft", True),
-        "Value Score": ("distress_score", False),
         "Days on Market": ("days_on_market", False),
         "Distress Score": ("distress_score", False),
     }
@@ -236,47 +235,81 @@ with tab1:
         df = df.sort_values(col_name, ascending=asc)
 
     if view_mode == "Table":
-        display_cols = ["title", "location", "price", "bedrooms", "bathrooms",
-                        "area_sqft", "price_per_sqft", "days_on_market",
+        # Include photo thumbnail column using Streamlit's ImageColumn
+        display_cols = ["cover_photo", "title", "location", "price", "bedrooms",
+                        "bathrooms", "area_sqft", "price_per_sqft", "days_on_market",
                         "service_charge_estimate", "value_assessment", "source"]
         display_cols = [c for c in display_cols if c in df.columns]
         display_df = df[display_cols].copy()
-        display_df.columns = ["Title", "Location", "Price (AED)", "Beds", "Baths",
-                               "Area (sqft)", "AED/sqft", "Days Listed",
-                               "Est. SC/month", "Value", "Source"][:len(display_cols)]
-        display_df["Price (AED)"] = display_df["Price (AED)"].apply(lambda x: f"{x:,.0f}")
-        st.dataframe(display_df, use_container_width=True, height=500)
+
+        col_labels = {
+            "cover_photo": "Photo",
+            "title": "Title",
+            "location": "Location",
+            "price": "Price (AED)",
+            "bedrooms": "Beds",
+            "bathrooms": "Baths",
+            "area_sqft": "Area (sqft)",
+            "price_per_sqft": "AED/sqft",
+            "days_on_market": "Days Listed",
+            "service_charge_estimate": "SC/month",
+            "value_assessment": "Value",
+            "source": "Source",
+        }
+        display_df = display_df.rename(columns=col_labels)
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            height=520,
+            column_config={
+                "Photo": st.column_config.ImageColumn("Photo", width="small"),
+                "Price (AED)": st.column_config.NumberColumn("Price (AED)", format="%d"),
+                "AED/sqft": st.column_config.NumberColumn("AED/sqft", format="%d"),
+                "SC/month": st.column_config.NumberColumn("SC/month (AED)", format="%d"),
+                "Area (sqft)": st.column_config.NumberColumn("Area (sqft)", format="%.0f"),
+            },
+        )
     else:
-        # Card view
-        for i in range(0, min(len(df), 30), 2):
-            c1, c2 = st.columns(2)
-            for col_ui, idx in [(c1, i), (c2, i + 1)]:
+        # Card view — 3 columns
+        cols_per_row = 3
+        for i in range(0, min(len(df), 30), cols_per_row):
+            row_cols = st.columns(cols_per_row)
+            for j, col_ui in enumerate(row_cols):
+                idx = i + j
                 if idx >= len(df):
-                    continue
+                    break
                 p = df.iloc[idx].to_dict()
                 with col_ui:
                     with st.container(border=True):
                         photo = p.get("cover_photo", "")
                         if photo:
-                            try:
-                                st.image(photo, use_container_width=True)
-                            except Exception:
-                                pass
+                            st.image(photo, use_container_width=True)
+                        else:
+                            st.markdown(
+                                "<div style='height:160px;background:#1e2130;border-radius:8px;"
+                                "display:flex;align-items:center;justify-content:center;"
+                                "color:#555;font-size:2rem'>🏠</div>",
+                                unsafe_allow_html=True,
+                            )
 
-                        badge = ""
                         if p.get("is_distress"):
-                            badge = '<span class="distress-badge">DISTRESS</span>'
+                            st.markdown('<span class="distress-badge">DISTRESS DEAL</span>', unsafe_allow_html=True)
                         elif p.get("value_assessment") in ("Excellent Value", "Good Value"):
-                            badge = f'<span class="good-value-badge">{p["value_assessment"]}</span>'
+                            st.markdown(f'<span class="good-value-badge">{p["value_assessment"]}</span>', unsafe_allow_html=True)
 
-                        st.markdown(f"""
-                        <strong>{p.get("title", "N/A")}</strong> {badge}<br>
-                        <small>{p.get("location")} &bull; {p.get("source")}</small><br>
-                        <h3 style="margin:0.3rem 0">AED {p.get("price",0):,.0f}</h3>
-                        <span>{p.get("bedrooms","?")} Bed &bull; {p.get("bathrooms","?")} Bath &bull; {p.get("area_sqft",0):,.0f} sqft</span><br>
-                        <small>AED {p.get("price_per_sqft",0):,.0f}/sqft &bull; {p.get("days_on_market",0)} days listed</small><br>
-                        <small>Est. Service Charge: AED {p.get("service_charge_estimate",0):,.0f}/month</small>
-                        """, unsafe_allow_html=True)
+                        st.markdown(f"**{p.get('title', 'N/A')}**")
+                        st.caption(f"{p.get('location')} · {p.get('source', '')}")
+                        st.markdown(f"### AED {p.get('price', 0):,.0f}")
+                        st.markdown(
+                            f"{p.get('bedrooms','?')} Bed · {p.get('bathrooms','?')} Bath · "
+                            f"{p.get('area_sqft', 0):,.0f} sqft"
+                        )
+                        st.caption(
+                            f"AED {p.get('price_per_sqft', 0):,.0f}/sqft · "
+                            f"{p.get('days_on_market', 0)} days listed · "
+                            f"SC: AED {p.get('service_charge_estimate', 0):,.0f}/mo"
+                        )
                         if p.get("url"):
                             st.link_button("View Listing", p["url"], use_container_width=True)
 
