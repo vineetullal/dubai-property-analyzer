@@ -10,9 +10,9 @@ from database import (
     mark_alerts_read, log_refresh, get_last_refresh, get_market_stats,
     get_price_history,
 )
-from analyzer import enrich_properties, negotiation_tips, compute_proximity
+from analyzer import enrich_properties, negotiation_tips, compute_proximity, value_assessment
 from mortgage import rank_banks, affordability_summary
-from scraper import scrape_all
+from scraper import scrape_all, set_scraper_api_key, load_demo_data
 
 # ── Page config ────────────────────────────────
 st.set_page_config(
@@ -102,6 +102,16 @@ with st.sidebar:
     distress_only = st.toggle("Distress Deals Only", value=False)
 
     st.divider()
+    st.subheader("Live Data (Optional)")
+    api_key = st.text_input(
+        "ScraperAPI Key",
+        type="password",
+        placeholder="Paste key to fetch live listings",
+        help="Free at scraperapi.com — 1,000 requests/month included. Without a key, demo data is shown.",
+    )
+    if api_key:
+        set_scraper_api_key(api_key)
+
     st.subheader("Data Refresh")
     last = get_last_refresh()
     if last:
@@ -117,7 +127,7 @@ with st.sidebar:
                 progress.progress(pct)
                 status_text.text(msg)
 
-            props, errors = scrape_all(progress_callback=progress_cb)
+            props, errors, used_demo = scrape_all(progress_callback=progress_cb)
 
             if props:
                 enriched = enrich_properties(props)
@@ -126,15 +136,13 @@ with st.sidebar:
                     is_new = upsert_property(p)
                     if is_new:
                         new_count += 1
-                log_refresh(len(props), new_count, "success")
-                st.success(f"Found {len(props)} properties ({new_count} new)")
+                log_refresh(len(props), new_count, "demo" if used_demo else "success")
+                if used_demo:
+                    st.info(f"Showing {len(props)} demo listings. Add a ScraperAPI key above for live data.")
+                else:
+                    st.success(f"Found {len(props)} live properties ({new_count} new)")
             else:
                 log_refresh(0, 0, "no_results")
-                if errors:
-                    st.warning("Scraping returned no results. Sites may be blocking automated access.")
-                    with st.expander("Details"):
-                        for e in errors[:5]:
-                            st.text(e)
 
             progress.empty()
             status_text.empty()
@@ -157,9 +165,26 @@ filters = {
 properties = get_all_properties(filters)
 market_stats = get_market_stats()
 
+# Auto-load demo data on first visit (empty DB)
+if not properties:
+    from analyzer import enrich_properties
+    demo = enrich_properties(load_demo_data())
+    for p in demo:
+        upsert_property(p)
+    properties = get_all_properties(filters)
+    market_stats = get_market_stats()
+
+is_demo = properties and all("Demo" in (p.get("source") or "") for p in properties)
+
+# Compute value_assessment on load (not stored in DB)
+for p in properties:
+    if not p.get("value_assessment"):
+        p["value_assessment"] = value_assessment(p)
 
 # ── Header KPIs ────────────────────────────────
 st.title("Dubai Property Intelligence Dashboard")
+if is_demo:
+    st.info("Showing demo listings. To see live properties from Bayut & PropertyFinder, get a free API key at [scraperapi.com](https://www.scraperapi.com) and paste it in the sidebar, then hit **Refresh Data Now**.", icon="ℹ️")
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total Listings", f"{len(properties):,}")
