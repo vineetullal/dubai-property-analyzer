@@ -165,9 +165,16 @@ filters = {
 properties = get_all_properties(filters)
 market_stats = get_market_stats()
 
-# Auto-load demo data on first visit (empty DB)
-if not properties:
-    from analyzer import enrich_properties
+# Auto-load demo data on first visit, or if DB has stale fake URLs
+_stale = any("/property/details-" in (p.get("url") or "") for p in properties)
+if not properties or _stale:
+    if _stale:
+        import sqlite3
+        from config import DB_PATH
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM properties WHERE source LIKE '%Demo%'")
+        conn.commit()
+        conn.close()
     demo = enrich_properties(load_demo_data())
     for p in demo:
         upsert_property(p)
@@ -311,7 +318,8 @@ with tab1:
                             f"SC: AED {p.get('service_charge_estimate', 0):,.0f}/mo"
                         )
                         if p.get("url"):
-                            st.link_button("View Listing", p["url"], use_container_width=True)
+                            label = "Search on Site" if "Demo" in (p.get("source") or "") else "View Listing"
+                            st.link_button(label, p["url"], use_container_width=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
