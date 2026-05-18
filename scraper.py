@@ -49,7 +49,7 @@ def _fetch(url: str, timeout: int = 20, premium: bool = False) -> Optional[reque
         return None
 
 
-def test_connection(url: str = "https://www.bayut.com/for-sale/property/dubai/dubai-hills-estate/?price_min=2500000&price_max=3000000") -> dict:
+def test_connection(url: str = "https://www.propertyfinder.ae/en/search?c=1&fu=0&rp=y&ob=mr&pe=3000000&pb=2500000&l=dubai-hills-estate") -> dict:
     """Test ScraperAPI connection and return diagnostic info."""
     resp = _fetch(url, premium=True)
     if not resp:
@@ -409,96 +409,172 @@ def _pf_search_url(slug: str, page: int = 1) -> str:
 
 
 def _parse_pf_page(html: str, location_name: str) -> List[dict]:
+    import re
     soup = BeautifulSoup(html, "html.parser")
-    script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
-    if not script_tag:
-        return []
+    sc_psf = LOCATIONS.get(location_name, {}).get("service_charge_psf", 15)
 
-    try:
-        data = json.loads(script_tag.string)
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-    hits = []
-    try:
-        hits = data["props"]["pageProps"]["searchResult"]["listings"]
-    except (KeyError, TypeError):
-        pass
-
-    if not hits:
+    # Strategy 1: __NEXT_DATA__
+    tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if tag:
         try:
-            hits = data["props"]["pageProps"]["listings"]
-        except (KeyError, TypeError):
+            data = json.loads(tag.string)
+            hits = []
+            for path in [
+                ["props", "pageProps", "searchResult", "listings"],
+                ["props", "pageProps", "listings"],
+                ["props", "pageProps", "searchResult", "hits"],
+            ]:
+                try:
+                    node = data
+                    for k in path:
+                        node = node[k]
+                    hits = node
+                    break
+                except (KeyError, TypeError):
+                    continue
+
+            if hits:
+                results = []
+                for h in hits:
+                    try:
+                        price = (
+                            int(h["price"]["value"]) if isinstance(h.get("price"), dict)
+                            else int(h.get("price", 0))
+                        )
+                        if not price or price < PRICE_MIN or price > PRICE_MAX:
+                            continue
+                        area = (
+                            float(h["area"]["value"]) if isinstance(h.get("area"), dict)
+                            else float(h.get("area", 0))
+                        )
+                        photos = h.get("photos", [])
+                        cover = (
+                            photos[0].get("url", "") if photos and isinstance(photos[0], dict)
+                            else (photos[0] if photos else "")
+                        )
+                        service_charge = round(sc_psf * area / 12, 0) if area else 0
+                        results.append({
+                            "id": _make_id("pf", str(h.get("id", h.get("externalId", "")))),
+                            "title": h.get("title", h.get("name", "")),
+                            "price": price,
+                            "bedrooms": int(h.get("bedrooms", h.get("rooms", 0))),
+                            "bathrooms": int(h.get("bathrooms", h.get("baths", 0))),
+                            "area_sqft": area,
+                            "price_per_sqft": round(price / area, 2) if area else 0,
+                            "location": location_name,
+                            "community": (h.get("community") or {}).get("name", ""),
+                            "property_type": (h.get("type") or {}).get("name", "Property"),
+                            "url": PF_BASE + "/en/property/" + str(h.get("id", "")),
+                            "source": "PropertyFinder",
+                            "cover_photo": cover,
+                            "listed_date": h.get("publishedAt", h.get("createdAt", "")),
+                            "service_charge_estimate": service_charge,
+                            "latitude": (h.get("geography") or {}).get("lat"),
+                            "longitude": (h.get("geography") or {}).get("lng"),
+                            "agent_name": (h.get("agent") or {}).get("name", ""),
+                            "agent_phone": (h.get("agent") or {}).get("phone", ""),
+                            "description": h.get("description", "")[:500],
+                        })
+                    except Exception:
+                        continue
+                if results:
+                    return results
+        except Exception:
             pass
 
-    results = []
-    for h in hits:
+    # Strategy 2: JSON-LD
+    for tag in soup.find_all("script", {"type": "application/ld+json"}):
         try:
-            prop_id = _make_id("pf", str(h.get("id", h.get("externalId", ""))))
-            price = (
-                int(h["price"]["value"])
-                if isinstance(h.get("price"), dict)
-                else int(h.get("price", 0))
-            )
-            area = (
-                float(h["area"]["value"])
-                if isinstance(h.get("area"), dict)
-                else float(h.get("area", 0))
-            )
-            price_psf = round(price / area, 2) if area > 0 else 0
-
-            sc_psf = LOCATIONS.get(location_name, {}).get("service_charge_psf", 15)
-            service_charge = round(sc_psf * area / 12, 0)
-
-            photos = h.get("photos", [])
-            cover = (
-                photos[0].get("url", "") if photos and isinstance(photos[0], dict)
-                else (photos[0] if photos else "")
-            )
-
-            results.append({
-                "id": prop_id,
-                "title": h.get("title", h.get("name", "")),
-                "price": price,
-                "bedrooms": int(h.get("bedrooms", h.get("rooms", 0))),
-                "bathrooms": int(h.get("bathrooms", h.get("baths", 0))),
-                "area_sqft": area,
-                "price_per_sqft": price_psf,
-                "location": location_name,
-                "community": (
-                    h["community"]["name"]
-                    if isinstance(h.get("community"), dict) else ""
-                ),
-                "property_type": (
-                    h["type"]["name"]
-                    if isinstance(h.get("type"), dict) else h.get("type", "Property")
-                ),
-                "url": PF_BASE + "/en/property/" + str(h.get("id", "")),
-                "source": "PropertyFinder",
-                "cover_photo": cover,
-                "listed_date": h.get("publishedAt", h.get("createdAt", "")),
-                "service_charge_estimate": service_charge,
-                "latitude": (
-                    h["geography"]["lat"]
-                    if isinstance(h.get("geography"), dict) else None
-                ),
-                "longitude": (
-                    h["geography"]["lng"]
-                    if isinstance(h.get("geography"), dict) else None
-                ),
-                "agent_name": (
-                    h["agent"]["name"]
-                    if isinstance(h.get("agent"), dict) else ""
-                ),
-                "agent_phone": (
-                    h["agent"]["phone"]
-                    if isinstance(h.get("agent"), dict) else ""
-                ),
-                "description": h.get("description", "")[:500],
-            })
+            data = json.loads(tag.string or "")
+            items = data if isinstance(data, list) else [data]
+            results = []
+            for item in items:
+                price_raw = item.get("price", (item.get("offers") or {}).get("price", 0))
+                price = int(str(price_raw).replace(",", "").replace("AED", "").strip() or 0)
+                if not price or price < PRICE_MIN or price > PRICE_MAX:
+                    continue
+                url = item.get("url", "")
+                name = item.get("name", item.get("headline", ""))
+                if not name:
+                    continue
+                results.append({
+                    "id": _make_id("pf_ld", url or name),
+                    "title": name,
+                    "price": price,
+                    "bedrooms": int(item.get("numberOfBedrooms", item.get("numberOfRooms", 0)) or 0),
+                    "bathrooms": int(item.get("numberOfBathroomsTotal", 0) or 0),
+                    "area_sqft": float((item.get("floorSize") or {}).get("value", 0) or 0),
+                    "price_per_sqft": 0,
+                    "location": location_name,
+                    "community": "",
+                    "property_type": item.get("@type", "Property"),
+                    "url": url,
+                    "source": "PropertyFinder",
+                    "cover_photo": item.get("image", ""),
+                    "listed_date": "",
+                    "service_charge_estimate": 0,
+                    "latitude": None, "longitude": None,
+                    "agent_name": "", "agent_phone": "",
+                    "description": item.get("description", "")[:500],
+                })
+            if results:
+                return results
         except Exception:
             continue
 
+    # Strategy 3: Direct HTML parsing
+    results = []
+    cards = soup.find_all("article") or soup.select("[class*='card'], [class*='listing'], [class*='property']")
+    for card in cards:
+        try:
+            text = card.get_text(" ", strip=True)
+            price_match = re.search(r'AED\s*([\d,]+)', text)
+            if not price_match:
+                continue
+            price = int(price_match.group(1).replace(",", ""))
+            if price < PRICE_MIN or price > PRICE_MAX:
+                continue
+            link = card.find("a", href=True)
+            url = ""
+            if link:
+                href = link["href"]
+                url = href if href.startswith("http") else PF_BASE + href
+            title = ""
+            for t in ["h2", "h3", "h4"]:
+                el = card.find(t)
+                if el:
+                    title = el.get_text(strip=True)
+                    break
+            if not title or not url:
+                continue
+            bed_m = re.search(r'(\d+)\s*(?:Bed|BR)', text, re.IGNORECASE)
+            bath_m = re.search(r'(\d+)\s*Bath', text, re.IGNORECASE)
+            area_m = re.search(r'([\d,]+)\s*sqft', text, re.IGNORECASE)
+            area = float(area_m.group(1).replace(",", "")) if area_m else 0.0
+            img = card.find("img")
+            cover = img.get("src", img.get("data-src", "")) if img else ""
+            results.append({
+                "id": _make_id("pf_html", url),
+                "title": title,
+                "price": price,
+                "bedrooms": int(bed_m.group(1)) if bed_m else 0,
+                "bathrooms": int(bath_m.group(1)) if bath_m else 0,
+                "area_sqft": area,
+                "price_per_sqft": round(price / area, 2) if area else 0,
+                "location": location_name,
+                "community": "",
+                "property_type": "Property",
+                "url": url,
+                "source": "PropertyFinder",
+                "cover_photo": cover,
+                "listed_date": "",
+                "service_charge_estimate": round(sc_psf * area / 12, 0) if area else 0,
+                "latitude": None, "longitude": None,
+                "agent_name": "", "agent_phone": "",
+                "description": "",
+            })
+        except Exception:
+            continue
     return results
 
 
@@ -622,26 +698,21 @@ def scrape_all(progress_callback=None):
 
 
 def _do_scrape(progress_callback=None):
+    """
+    Scrapes PropertyFinder only — Bayut serves CAPTCHAs to all automated requests.
+    """
     all_properties = []
     errors = []
     location_names = list(LOCATIONS.keys())
-    total = len(location_names) * 2
+    total = len(location_names)
     done = 0
 
     for loc in location_names:
         try:
-            results = scrape_bayut(loc)
-            all_properties.extend(results)
-        except Exception as e:
-            errors.append(f"Bayut/{loc}: {e}")
-
-        done += 1
-        if progress_callback:
-            progress_callback(done / total, f"Bayut: {loc}")
-
-        try:
             results = scrape_propertyfinder(loc)
             all_properties.extend(results)
+            if not results:
+                errors.append(f"PropertyFinder/{loc}: 0 results (CAPTCHA or page structure change)")
         except Exception as e:
             errors.append(f"PropertyFinder/{loc}: {e}")
 
