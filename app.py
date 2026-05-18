@@ -12,7 +12,7 @@ from database import (
 )
 from analyzer import enrich_properties, negotiation_tips, compute_proximity, value_assessment
 from mortgage import rank_banks, affordability_summary
-from scraper import scrape_all, set_scraper_api_key, load_demo_data
+from scraper import scrape_all, set_scraper_api_key, load_demo_data, test_connection
 
 # ── Page config ────────────────────────────────
 st.set_page_config(
@@ -111,6 +111,19 @@ with st.sidebar:
     )
     if api_key:
         set_scraper_api_key(api_key)
+        if st.button("Test Connection", use_container_width=True):
+            with st.spinner("Testing ScraperAPI against Bayut..."):
+                result = test_connection()
+            if result["ok"] and result["has_next_data"]:
+                st.success("Connection OK — listing data found!")
+            elif result["ok"] and not result["has_next_data"]:
+                st.warning("Connected but listing data not found in page. Site may have changed structure.")
+                with st.expander("Page preview"):
+                    st.code(result["preview"])
+            else:
+                st.error(f"Connection failed (HTTP {result['status']})")
+                with st.expander("Page preview"):
+                    st.code(result["preview"])
 
     st.subheader("Data Refresh")
     last = get_last_refresh()
@@ -143,6 +156,11 @@ with st.sidebar:
                     st.success(f"Found {len(props)} live properties ({new_count} new)")
             else:
                 log_refresh(0, 0, "no_results")
+                st.error("No properties returned.")
+            if errors:
+                with st.expander("Scraper errors"):
+                    for e in errors:
+                        st.text(e)
 
             progress.empty()
             status_text.empty()

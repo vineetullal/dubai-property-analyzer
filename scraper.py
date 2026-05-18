@@ -27,17 +27,19 @@ def set_scraper_api_key(key: str):
     _SCRAPER_API_KEY = key.strip() if key else None
 
 
-def _fetch(url: str, timeout: int = 20) -> Optional[requests.Response]:
+def _fetch(url: str, timeout: int = 20, premium: bool = False) -> Optional[requests.Response]:
     """Fetch a URL, routing through ScraperAPI if a key is set."""
     try:
         if _SCRAPER_API_KEY:
             proxy_url = (
-                f"http://api.scraperapi.com"
+                f"https://api.scraperapi.com"
                 f"?api_key={_SCRAPER_API_KEY}"
                 f"&url={requests.utils.quote(url, safe='')}"
                 f"&render=true"
+                f"&country_code=ae"
+                + ("&premium=true" if premium else "")
             )
-            resp = requests.get(proxy_url, timeout=60)
+            resp = requests.get(proxy_url, timeout=120)
         else:
             resp = requests.get(url, headers=HEADERS, timeout=timeout)
         resp.raise_for_status()
@@ -45,6 +47,23 @@ def _fetch(url: str, timeout: int = 20) -> Optional[requests.Response]:
     except Exception as e:
         print(f"[scraper] fetch error for {url}: {e}")
         return None
+
+
+def test_connection(url: str = "https://www.bayut.com/for-sale/property/dubai/dubai-hills-estate/?price_min=2500000&price_max=3000000") -> dict:
+    """Test ScraperAPI connection and return diagnostic info."""
+    resp = _fetch(url, premium=True)
+    if not resp:
+        return {"ok": False, "status": None, "has_next_data": False, "preview": "Request failed"}
+
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(resp.text, "html.parser")
+    has_next = soup.find("script", {"id": "__NEXT_DATA__"}) is not None
+    return {
+        "ok": resp.status_code == 200,
+        "status": resp.status_code,
+        "has_next_data": has_next,
+        "preview": resp.text[:300],
+    }
 
 
 def _sleep():
@@ -156,7 +175,7 @@ def scrape_bayut(location_name: str) -> List[dict]:
 
     for page in range(1, 6):
         url = _bayut_search_url(slug, page)
-        resp = _fetch(url)
+        resp = _fetch(url, premium=bool(_SCRAPER_API_KEY))
         if not resp:
             break
         results = _parse_bayut_page(resp.text, location_name)
